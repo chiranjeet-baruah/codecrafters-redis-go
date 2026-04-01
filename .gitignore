@@ -1,0 +1,12 @@
+.DS_Store
+.idea
+.vscode
+.keep
+vendor/
+cover.out
+data
+bin
+CLAUDE.md
+AGENT.md
+docs/
+.claude
