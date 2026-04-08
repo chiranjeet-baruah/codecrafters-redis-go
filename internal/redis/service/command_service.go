@@ -1,6 +1,8 @@
 package service
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/codecrafters-io/redis-starter-go/internal/redis/domain"
@@ -36,8 +38,35 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		if len(cmd.Args) < 2 {
 			return dto.Error("wrong number of arguments for 'set' command")
 		}
-		s.store.Set(cmd.Args[0], cmd.Args[1])
-		return dto.SimpleString("OK")
+		if len(cmd.Args) == 2 {
+			s.store.Set(cmd.Args[0], cmd.Args[1])
+			return dto.SimpleString("OK")
+		}
+		// Handle SET with options (EX/PX)
+		if len(cmd.Args) >= 4 {
+			switch cmd.Args[2] {
+			case "EX":
+				if ttl, err := parseTTL(cmd.Args[3]); err == nil {
+					s.store.SetWithTTLEx(cmd.Args[0], cmd.Args[1], ttl)
+					return dto.SimpleString("OK")
+				} else {
+					return dto.Error("invalid expiration time")
+				}
+			case "PX":
+				if ttl, err := parseTTL(cmd.Args[3]); err == nil {
+					s.store.SetWithTTLPx(cmd.Args[0], cmd.Args[1], ttl)
+					return dto.SimpleString("OK")
+				} else {
+					return dto.Error("invalid expiration time")
+				}
+			default:
+				return dto.Error("unknown option for 'set' command")
+			}
+		}
+		// Wrong number of arguments for SET with options
+		if len(cmd.Args) > 2 {
+			return dto.Error("wrong number of arguments for 'set' command with options")
+		}
 	case "GET":
 		if len(cmd.Args) < 1 {
 			return dto.Error("wrong number of arguments for 'get' command")
@@ -50,4 +79,17 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 	default:
 		return dto.Error("unknown command")
 	}
+	return dto.Error("unhandled command")
+}
+
+// parseTTL converts a string to an integer TTL value, validating it's non-negative.
+func parseTTL(str string) (int, error) {
+	val, err := strconv.Atoi(str)
+	if err != nil {
+		return 0, err
+	}
+	if val < 0 {
+		return 0, fmt.Errorf("invalid expiration time")
+	}
+	return val, nil
 }

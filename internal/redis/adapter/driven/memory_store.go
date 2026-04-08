@@ -1,6 +1,9 @@
 package driven
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // MemoryStore is a goroutine-safe in-memory key-value store.
 // It implements domain.Store.
@@ -27,4 +30,36 @@ func (m *MemoryStore) Get(key string) (string, bool) {
 	defer m.mu.RUnlock()
 	v, ok := m.data[key]
 	return v, ok
+}
+
+// Delete removes a key from the store.
+func (m *MemoryStore) Delete(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.data, key)
+}
+
+// setWithTTLInternal is a helper that sets a key with a TTL and schedules deletion.
+func (m *MemoryStore) setWithTTLInternal(key, value string, d time.Duration) {
+	m.Set(key, value)
+	go func() {
+		time.Sleep(d)
+		m.Delete(key)
+	}()
+}
+
+// SetWithTTLEx sets a value under the key with an expiration time in seconds.
+func (m *MemoryStore) SetWithTTLEx(key, value string, ttlSeconds int) {
+	if ttlSeconds < 0 {
+		return // or could return an error, but Redis ignores negative TTL
+	}
+	m.setWithTTLInternal(key, value, time.Duration(ttlSeconds)*time.Second)
+}
+
+// SetWithTTLPx sets a value under the key with an expiration time in milliseconds.
+func (m *MemoryStore) SetWithTTLPx(key, value string, ttlMilliseconds int) {
+	if ttlMilliseconds < 0 {
+		return // or could return an error, but Redis ignores negative TTL
+	}
+	m.setWithTTLInternal(key, value, time.Duration(ttlMilliseconds)*time.Millisecond)
 }

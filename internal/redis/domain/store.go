@@ -4,4 +4,7 @@ package domain
 type Store interface {
 	Set(key, value string)
 	Get(key string) (string, bool)
+	SetWithTTLEx(key, value string, ttlSeconds int)
+	SetWithTTLPx(key, value string, ttlMilliseconds int)
+	Delete(key string)
 }
