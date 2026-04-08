@@ -1,33 +1,81 @@
 [![progress-banner](https://backend.codecrafters.io/progress/redis/6f776a61-ecda-4e30-9fb3-606eea516078)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
 
-This is a starting point for Go solutions to the
-["Build Your Own Redis" Challenge](https://codecrafters.io/challenges/redis).
+# Build Your Own Redis — Go
 
-In this challenge, you'll build a toy Redis clone that's capable of handling
-basic commands like `PING`, `SET` and `GET`. Along the way we'll learn about
-event loops, the Redis protocol and more.
+A Redis-compatible server built from scratch in Go as part of the [CodeCrafters "Build Your Own Redis" challenge](https://codecrafters.io/challenges/redis).
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+## Overview
 
-# Passing the first stage
+This project implements a subset of the Redis protocol, including:
 
-The entry point for your Redis implementation is in `app/main.go`. Study and
-uncomment the relevant code, and push your changes to pass the first stage:
+- TCP server on `0.0.0.0:6379`
+- [RESP (Redis Serialization Protocol)](https://redis.io/docs/reference/protocol-spec/) parsing and encoding
+- Commands: `PING`, `ECHO`, `SET`, `GET`
+- In-memory key-value store with optional TTL support
+- Concurrent client handling via goroutines
 
-```sh
-git commit -am "pass 1st stage" # any msg
+## Requirements
+
+- Go 1.26+
+
+## Getting Started
+
+**Build:**
+
+```bash
+go build -o /tmp/codecrafters-build-redis-go app/*.go
+```
+
+**Run:**
+
+```bash
+./your_program.sh
+
+# With a custom port:
+./your_program.sh --port 6380
+```
+
+**Format:**
+
+```bash
+gofmt -w app/*.go
+```
+
+## Project Structure
+
+```
+.
+├── app/
+│   └── main.go          # Entry point and server implementation
+├── your_program.sh      # Local compile-and-run wrapper
+├── .codecrafters/
+│   ├── compile.sh       # Remote build script
+│   └── run.sh           # Remote execution script
+├── go.mod
+└── README.md
+```
+
+## Testing
+
+There is no local test suite. Validation is handled remotely by the CodeCrafters platform. Push your changes to run the test harness:
+
+```bash
 git push origin master
 ```
 
-That's all!
+## CodeCrafters Stages
 
-# Stage 2 & beyond
+Each stage builds on the previous. After implementing a stage, commit and push:
 
-Note: This section is for stages 2 and beyond.
+```bash
+git commit -am "implement stage N"
+git push origin master
+```
 
-1. Ensure you have `go (1.26)` installed locally
-1. Run `./your_program.sh` to run your Redis server, which is implemented in
-   `app/main.go`.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
+Test output streams directly to your terminal.
+
+> **Note:** If you're viewing this on GitHub, head to [codecrafters.io](https://codecrafters.io) to attempt the challenge yourself.
+
+## License
+
+This project is for educational purposes as part of the CodeCrafters challenge platform.
