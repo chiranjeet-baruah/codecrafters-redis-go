@@ -16,3 +16,8 @@ func BulkString(s string) string {
 func Error(msg string) string {
 	return "-ERR " + msg + "\r\n"
 }
+
+// NullBulkString encodes a RESP null bulk string: $-1\r\n
+func NullBulkString() string {
+	return "$-1\r\n"
+}

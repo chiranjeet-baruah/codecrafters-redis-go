@@ -32,6 +32,21 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			return dto.Error("wrong number of arguments for 'echo' command")
 		}
 		return dto.BulkString(cmd.Args[0])
+	case "SET":
+		if len(cmd.Args) < 2 {
+			return dto.Error("wrong number of arguments for 'set' command")
+		}
+		s.store.Set(cmd.Args[0], cmd.Args[1])
+		return dto.SimpleString("OK")
+	case "GET":
+		if len(cmd.Args) < 1 {
+			return dto.Error("wrong number of arguments for 'get' command")
+		}
+		val, ok := s.store.Get(cmd.Args[0])
+		if !ok {
+			return dto.NullBulkString()
+		}
+		return dto.BulkString(val)
 	default:
 		return dto.Error("unknown command")
 	}
