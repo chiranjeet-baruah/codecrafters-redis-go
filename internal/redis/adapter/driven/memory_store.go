@@ -8,13 +8,17 @@ import (
 // MemoryStore is a goroutine-safe in-memory key-value store.
 // It implements domain.Store.
 type MemoryStore struct {
-	mu   sync.RWMutex
-	data map[string]string
+	mu        sync.RWMutex
+	data      map[string]string
+	rPushData map[string][]string
 }
 
 // NewMemoryStore allocates an empty store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{data: make(map[string]string)}
+	return &MemoryStore{
+		data:      make(map[string]string),
+		rPushData: make(map[string][]string), // PERF: eager init — eliminates nil guard branch inside the locked RPush critical section
+	}
 }
 
 // Set stores a value under the key.
@@ -42,10 +46,8 @@ func (m *MemoryStore) Delete(key string) {
 // setWithTTLInternal is a helper that sets a key with a TTL and schedules deletion.
 func (m *MemoryStore) setWithTTLInternal(key, value string, d time.Duration) {
 	m.Set(key, value)
-	go func() {
-		time.Sleep(d)
-		m.Delete(key)
-	}()
+	// PERF: time.AfterFunc uses the runtime's timer heap — eliminates per-key goroutine stack (2–8KB each) and scheduler overhead at scale
+	time.AfterFunc(d, func() { m.Delete(key) })
 }
 
 // SetWithTTLEx sets a value under the key with an expiration time in seconds.
@@ -62,4 +64,15 @@ func (m *MemoryStore) SetWithTTLPx(key, value string, ttlMilliseconds int) {
 		return // or could return an error, but Redis ignores negative TTL
 	}
 	m.setWithTTLInternal(key, value, time.Duration(ttlMilliseconds)*time.Millisecond)
+}
+
+func (m *MemoryStore) RPush(key string, value string) int {
+	if len(value) == 0 {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// PERF: nil check removed — rPushData is always initialized in NewMemoryStore
+	m.rPushData[key] = append(m.rPushData[key], value)
+	return len(m.rPushData[key])
 }

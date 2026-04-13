@@ -7,4 +7,5 @@ type Store interface {
 	SetWithTTLEx(key, value string, ttlSeconds int)
 	SetWithTTLPx(key, value string, ttlMilliseconds int)
 	Delete(key string)
+	RPush(key string, value string) int // exposes list append through the Store port for RPUSH dispatch
 }
