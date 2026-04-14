@@ -43,4 +43,8 @@ type Store interface {
 
 	// LLen returns the length of the list at a key, or 0 if the key does not exist.
 	LLen(key string) int
+
+	// LPop removes and returns the first element of the list at a key or an empty string if the key does not exist
+	// or the list is empty.
+	LPop(key string) string
 }

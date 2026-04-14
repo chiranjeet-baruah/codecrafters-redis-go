@@ -16,7 +16,7 @@ type Handler interface {
 }
 
 // CommandService routes RESP commands to the store and encodes the responses.
-// Supported commands: PING, ECHO, SET (with optional EX/PX), GET, RPUSH, LRANGE.
+// Supported commands: PING, ECHO, SET (with optional EX/PX), GET, RPUSH, LPUSH, LRANGE, LLEN, LPOP.
 type CommandService struct {
 	store domain.Store
 }
@@ -129,6 +129,15 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		}
 		length := s.store.LLen(cmd.Args[0])
 		return dto.Integer(length)
+	case "LPOP":
+		if len(cmd.Args) < 1 {
+			return dto.Error("wrong number of arguments for 'lpop' command")
+		}
+		val := s.store.LPop(cmd.Args[0])
+		if val == "" {
+			return dto.NullBulkString() // list was empty or key didn't exist
+		}
+		return dto.BulkString(val)
 	default:
 		return dto.Error("unknown command")
 	}

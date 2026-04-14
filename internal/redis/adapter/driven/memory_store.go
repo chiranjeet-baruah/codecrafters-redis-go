@@ -196,3 +196,17 @@ func (m *MemoryStore) LLen(key string) int {
 	defer m.mu.RUnlock()
 	return len(m.pushData[key])
 }
+
+// LPop removes and returns the first element of the list at a key
+// or an empty string if the key does not exist or the list is empty.
+func (m *MemoryStore) LPop(key string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.pushData[key]) == 0 {
+		return ""
+	}
+	result := m.pushData[key][0]
+	m.pushData[key][0] = "" // release the string so it can be GC'd before narrowing the slice
+	m.pushData[key] = m.pushData[key][1:]
+	return result
+}
