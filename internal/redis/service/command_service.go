@@ -123,6 +123,12 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			sb.WriteString("\r\n")
 		}
 		return sb.String()
+	case "LLEN":
+		if len(cmd.Args) < 1 {
+			return dto.Error("wrong number of arguments for 'llen' command")
+		}
+		length := s.store.LLen(cmd.Args[0])
+		return dto.Integer(length)
 	default:
 		return dto.Error("unknown command")
 	}

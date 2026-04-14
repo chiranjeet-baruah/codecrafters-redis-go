@@ -40,4 +40,7 @@ type Store interface {
 	// LPushMultiple prepends all non-empty values to the head of the list at a key
 	// and returns the new list length.
 	LPushMultiple(key string, values []string) int
+
+	// LLen returns the length of the list at a key, or 0 if the key does not exist.
+	LLen(key string) int
 }

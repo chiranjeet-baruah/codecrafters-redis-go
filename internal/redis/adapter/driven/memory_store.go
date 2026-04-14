@@ -94,14 +94,13 @@ func (m *MemoryStore) SetWithTTLPx(key, value string, ttlMilliseconds int) {
 }
 
 // RPush appends value to the tail of the list at a key and returns the new list length.
-// An empty value is silently ignored.
+// An empty value is silently ignored; the current list length is still returned.
 func (m *MemoryStore) RPush(key string, value string) int {
-	if len(value) == 0 {
-		return 0
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pushData[key] = append(m.pushData[key], value)
+	if len(value) > 0 {
+		m.pushData[key] = append(m.pushData[key], value)
+	}
 	return len(m.pushData[key])
 }
 
@@ -158,18 +157,17 @@ func (m *MemoryStore) LRange(key string, start, stop int) []string {
 }
 
 // LPush prepends value to the head of the list at a key and returns the new list length.
-// An empty value is silently ignored.
+// An empty value is silently ignored; the current list length is still returned.
 func (m *MemoryStore) LPush(key string, value string) int {
-	if len(value) == 0 {
-		return 0
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	existing := m.pushData[key]
-	// Allocate with exact capacity so the subsequent append doesn't trigger a second alloc.
-	newList := make([]string, 1, 1+len(existing))
-	newList[0] = value
-	m.pushData[key] = append(newList, existing...)
+	if len(value) > 0 {
+		existing := m.pushData[key]
+		// Capacity covers both the new element and the existing tail, so append won't reallocate.
+		newList := make([]string, 1, 1+len(existing))
+		newList[0] = value
+		m.pushData[key] = append(newList, existing...)
+	}
 	return len(m.pushData[key])
 }
 
@@ -189,5 +187,12 @@ func (m *MemoryStore) LPushMultiple(key string, values []string) int {
 		}
 	}
 	m.pushData[key] = append(prefix, existing...)
+	return len(m.pushData[key])
+}
+
+// LLen returns the length of the list at a key, or 0 if the key does not exist.
+func (m *MemoryStore) LLen(key string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return len(m.pushData[key])
 }

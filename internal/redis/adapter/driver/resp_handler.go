@@ -15,7 +15,7 @@ import (
 
 var argBufPool = sync.Pool{
 	New: func() any {
-		return new(make([]byte, 256))
+		return new(make([]byte, 0, 256))
 	},
 }
 

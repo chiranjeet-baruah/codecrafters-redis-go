@@ -39,5 +39,10 @@ func NullBulkString() string {
 func Integer(n int) string {
 	var buf [32]byte
 	b := strconv.AppendInt(buf[:0], int64(n), 10)
-	return ":" + string(b) + "\r\n"
+	var sb strings.Builder
+	sb.Grow(1 + len(b) + 2) // pre-size so the builder never reallocates
+	sb.WriteByte(':')
+	sb.Write(b)
+	sb.WriteString("\r\n")
+	return sb.String()
 }
