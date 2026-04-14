@@ -13,15 +13,14 @@ import (
 	"github.com/codecrafters-io/redis-starter-go/internal/redis/service"
 )
 
-// PERF: pool reuses per-argument read buffers across all connections — eliminates N heap allocs per parsed command (N = argument count)
 var argBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 256) // PERF: 256B covers typical Redis key/value sizes without realloc
-		return &b
+		return new(make([]byte, 256))
 	},
 }
 
-// handleConn runs the read-dispatch-write loop for one client connection.
+// handleConn runs the read → dispatch → write loop for a single client connection.
+// It returns (closing the connection) on any I/O error or EOF.
 func handleConn(conn net.Conn, handler service.Handler) {
 	defer func(conn net.Conn) {
 		err := conn.Close()
@@ -30,22 +29,24 @@ func handleConn(conn net.Conn, handler service.Handler) {
 		}
 	}(conn)
 	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn) // PERF: buffers writes — replaces per-response write(2) syscall with a single buffered flush (~200–400ns saved per unbuffered write)
+	writer := bufio.NewWriter(conn) // buffers write; flushed once per round-trip
 	for {
 		cmd, err := readCommand(reader)
 		if err != nil {
 			return
 		}
-		if _, err := io.WriteString(writer, handler.Handle(cmd)); err != nil { // PERF: writes to in-memory buffer, not directly to socket
+		if _, err := io.WriteString(writer, handler.Handle(cmd)); err != nil {
 			return
 		}
-		if err := writer.Flush(); err != nil { // PERF: single syscall per round-trip; coalesces pipelined responses
+		if err := writer.Flush(); err != nil {
 			return
 		}
 	}
 }
 
-// readCommand parses one RESP array command from r.
+// readCommand reads one complete RESP array command from r and returns it.
+// Returns an error on malformed input or any underlying I/O failure.
+// The returned Command.Name is already uppercased.
 func readCommand(r *bufio.Reader) (domain.Command, error) {
 	line, err := r.ReadString('\n')
 	if err != nil {
@@ -60,8 +61,8 @@ func readCommand(r *bufio.Reader) (domain.Command, error) {
 		return domain.Command{}, err
 	}
 
-	bp := argBufPool.Get().(*[]byte) // PERF: ~5ns pool get vs ~30–50ns heap alloc per argument buffer
-	defer argBufPool.Put(bp)         // PERF: returned at function exit — safe because parts[] holds string copies, not references to *bp
+	bp := argBufPool.Get().(*[]byte)
+	defer argBufPool.Put(bp) // return to pool; safe because parts holds string copies, not refs to bp
 
 	parts := make([]string, count)
 	for i := range parts {
@@ -78,14 +79,14 @@ func readCommand(r *bufio.Reader) (domain.Command, error) {
 			return domain.Command{}, err
 		}
 		if cap(*bp) < n+2 {
-			*bp = make([]byte, n+2) // PERF: rare realloc — only when arg exceeds pool buffer cap; pool retains the larger buffer for future reuse
+			*bp = make([]byte, n+2) // grow only when the argument is larger than the buffer
 		}
 		buf := (*bp)[:n+2]
 		if _, err = io.ReadFull(r, buf); err != nil {
 			return domain.Command{}, err
 		}
-		parts[i] = string(buf[:n]) // PERF: necessary copy — string must outlive the pooled buffer
+		parts[i] = string(buf[:n]) // copy out before returning the buffer to the pool
 	}
-	// PERF: uppercase once at parse time — enforces domain.Command.Name contract and removes strings.ToUpper alloc from every Handle() dispatch
+	// Uppercase once here so every handler receives a consistent, case-insensitive name.
 	return domain.Command{Name: strings.ToUpper(parts[0]), Args: parts[1:]}, nil
 }

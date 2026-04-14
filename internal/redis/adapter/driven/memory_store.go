@@ -5,30 +5,39 @@ import (
 	"time"
 )
 
-// MemoryStore is a goroutine-safe in-memory key-value store.
-// It implements domain.Store.
+// MemoryStore is an in-memory key-value store safe for concurrent use.
+// It supports string values, list values, and per-key TTL expiry.
 type MemoryStore struct {
 	mu        sync.RWMutex
 	data      map[string]string
 	rPushData map[string][]string
+	// timers keep a reference to each key's expiry timer so it can be
+	// canceled if the key is overwritten or deleted before it fires.
+	timers map[string]*time.Timer
 }
 
-// NewMemoryStore allocates an empty store.
+// NewMemoryStore returns an empty, ready-to-use store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		data:      make(map[string]string),
-		rPushData: make(map[string][]string), // PERF: eager init — eliminates nil guard branch inside the locked RPush critical section
+		rPushData: make(map[string][]string),
+		timers:    make(map[string]*time.Timer),
 	}
 }
 
-// Set stores a value under the key.
+// Set stores value under a key and clears any expiry previously set on that key.
+// Redis behavior: a plain SET always removes an existing TTL.
 func (m *MemoryStore) Set(key, value string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if t, ok := m.timers[key]; ok {
+		t.Stop() // cancel the old expiry so it won't delete the new value
+		delete(m.timers, key)
+	}
 	m.data[key] = value
 }
 
-// Get retrieves a value by key, returning false if absent.
+// Get returns the value stored under the key and whether it exists.
 func (m *MemoryStore) Get(key string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -36,43 +45,114 @@ func (m *MemoryStore) Get(key string) (string, bool) {
 	return v, ok
 }
 
-// Delete removes a key from the store.
+// Delete removes the key from the store and cancels any pending expiry timer for it.
 func (m *MemoryStore) Delete(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if t, ok := m.timers[key]; ok {
+		t.Stop()
+		delete(m.timers, key)
+	}
 	delete(m.data, key)
 }
 
-// setWithTTLInternal is a helper that sets a key with a TTL and schedules deletion.
+// setWithTTLInternal stores key→value and schedules its automatic deletion after d.
+// If the key already has a timer, it is canceled first so the old expiry cannot
+// fire and delete the freshly written value.
+// Must be called without m.mu held.
 func (m *MemoryStore) setWithTTLInternal(key, value string, d time.Duration) {
-	m.Set(key, value)
-	// PERF: time.AfterFunc uses the runtime's timer heap — eliminates per-key goroutine stack (2–8KB each) and scheduler overhead at scale
-	time.AfterFunc(d, func() { m.Delete(key) })
+	m.mu.Lock()
+	if t, ok := m.timers[key]; ok {
+		t.Stop()
+	}
+	m.data[key] = value
+	m.timers[key] = time.AfterFunc(d, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		delete(m.data, key)
+		delete(m.timers, key)
+	})
+	m.mu.Unlock()
 }
 
-// SetWithTTLEx sets a value under the key with an expiration time in seconds.
+// SetWithTTLEx stores value under a key and deletes it after ttlSeconds seconds.
+// A non-positive value is ignored.
 func (m *MemoryStore) SetWithTTLEx(key, value string, ttlSeconds int) {
 	if ttlSeconds < 0 {
-		return // or could return an error, but Redis ignores negative TTL
+		return
 	}
 	m.setWithTTLInternal(key, value, time.Duration(ttlSeconds)*time.Second)
 }
 
-// SetWithTTLPx sets a value under the key with an expiration time in milliseconds.
+// SetWithTTLPx stores the value under a key and deletes it after ttlMilliseconds milliseconds.
+// A non-positive value is ignored.
 func (m *MemoryStore) SetWithTTLPx(key, value string, ttlMilliseconds int) {
 	if ttlMilliseconds < 0 {
-		return // or could return an error, but Redis ignores negative TTL
+		return
 	}
 	m.setWithTTLInternal(key, value, time.Duration(ttlMilliseconds)*time.Millisecond)
 }
 
+// RPush appends value to the tail of the list at a key and returns the new list length.
+// An empty value is silently ignored.
 func (m *MemoryStore) RPush(key string, value string) int {
 	if len(value) == 0 {
 		return 0
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// PERF: nil check removed — rPushData is always initialized in NewMemoryStore
 	m.rPushData[key] = append(m.rPushData[key], value)
 	return len(m.rPushData[key])
+}
+
+// RPushMultiple appends all non-empty values to the tail of the list at a key
+// and returns the new list length.
+func (m *MemoryStore) RPushMultiple(key string, values []string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, v := range values {
+		if len(v) > 0 {
+			m.rPushData[key] = append(m.rPushData[key], v)
+		}
+	}
+	return len(m.rPushData[key])
+}
+
+// LRange returns the elements of the list at a key between start and stop (both inclusive).
+// Negative indices count from the tail: -1 is the last element, -2 the second to last, etc.
+// Returns nil if the key does not exist or the range is empty.
+//
+// The returned slice is a copy, so it is safe to use even if the list is modified concurrently.
+func (m *MemoryStore) LRange(key string, start, stop int) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	values, ok := m.rPushData[key]
+	if !ok {
+		return nil
+	}
+	n := len(values)
+	// Resolve negative indices: -1 → last element, -2 → second to last, etc.
+	if start < 0 {
+		start = n + start
+	}
+	if stop < 0 {
+		stop = n + stop
+	}
+	// Clamp to the valid index range.
+	if start < 0 {
+		start = 0
+	}
+	if start >= n {
+		return nil
+	}
+	if stop >= n {
+		stop = n - 1 // stop is inclusive; n-1 is the last valid index
+	}
+	if start > stop {
+		return nil
+	}
+	// Copy the slice so concurrent appends to the list don't affect what the caller sees.
+	result := make([]string, stop-start+1)
+	copy(result, values[start:stop+1])
+	return result
 }

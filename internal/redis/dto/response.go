@@ -5,18 +5,17 @@ import (
 	"strings"
 )
 
-// SimpleString encodes a RESP simple string: +<s>\r\n
+// SimpleString encodes s as a RESP simple string: +<s>\r\n
 func SimpleString(s string) string {
 	return "+" + s + "\r\n"
 }
 
-// BulkString encodes a RESP bulk string: $<len>\r\n<s>\r\n
-// PERF: strconv.AppendInt into a stack [32]byte avoids fmt.Sprintf's reflection + interface boxing (~80–120ns saved per call)
+// BulkString encodes s as a RESP bulk string: $<len>\r\n<s>\r\n
 func BulkString(s string) string {
 	var hdr [32]byte
-	b := strconv.AppendInt(hdr[:0], int64(len(s)), 10) // PERF: hdr lives on the stack — zero heap alloc for length formatting
+	b := strconv.AppendInt(hdr[:0], int64(len(s)), 10)
 	var sb strings.Builder
-	sb.Grow(1 + len(b) + 2 + len(s) + 2) // PERF: pre-sized single backing alloc; no realloc during writes
+	sb.Grow(1 + len(b) + 2 + len(s) + 2) // pre-size so the builder never reallocates
 	sb.WriteByte('$')
 	sb.Write(b)
 	sb.WriteString("\r\n")
@@ -25,20 +24,20 @@ func BulkString(s string) string {
 	return sb.String()
 }
 
-// Error encodes a RESP error: -ERR <msg>\r\n
+// Error encodes msg as a RESP error reply: -ERR <msg>\r\n
 func Error(msg string) string {
 	return "-ERR " + msg + "\r\n"
 }
 
-// NullBulkString encodes a RESP null bulk string: $-1\r\n
+// NullBulkString returns the RESP null bulk string ($-1\r\n),
+// used to indicate a missing key.
 func NullBulkString() string {
 	return "$-1\r\n"
 }
 
-// Integer encodes a RESP integer reply: :<n>\r\n
-// PERF: strconv.AppendInt to stack buffer — no fmt.Sprintf, no reflection; single alloc for the returned string
+// Integer encodes n as a RESP integer reply: :<n>\r\n
 func Integer(n int) string {
 	var buf [32]byte
-	b := strconv.AppendInt(buf[:0], int64(n), 10) // PERF: buf stays on the stack; only the returned string escapes to heap
+	b := strconv.AppendInt(buf[:0], int64(n), 10)
 	return ":" + string(b) + "\r\n"
 }

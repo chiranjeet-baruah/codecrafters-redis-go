@@ -1,32 +1,38 @@
 package service
 
 import (
-	"fmt"
+	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/codecrafters-io/redis-starter-go/internal/redis/domain"
 	"github.com/codecrafters-io/redis-starter-go/internal/redis/dto"
 )
 
-// Handler is the port the TCP adapter calls for each parsed command.
+// Handler is the interface the TCP adapter calls for each parsed RESP command.
+// Handle must return a complete, RESP-encoded response string.
 type Handler interface {
 	Handle(cmd domain.Command) string
 }
 
-// CommandService implements Handler with PING and ECHO logic.
+// CommandService routes RESP commands to the store and encodes the responses.
+// Supported commands: PING, ECHO, SET (with optional EX/PX), GET, RPUSH, LRANGE.
 type CommandService struct {
 	store domain.Store
 }
 
-// NewCommandService constructs the service with its storage dependency.
+// NewCommandService returns a CommandService backed by the given store.
 func NewCommandService(store domain.Store) *CommandService {
 	return &CommandService{store: store}
 }
 
-// Handle dispatches a command and returns a RESP-encoded response string.
-// cmd.Name is guaranteed to be uppercase by the RESP parser.
+// errInvalidTTL is returned by parseTTL when the TTL value is negative.
+var errInvalidTTL = errors.New("invalid expiration time")
+
+// Handle routes cmd to the right handler and returns a RESP-encoded response.
+// cmd.Name is already uppercased by the RESP parser.
 func (s *CommandService) Handle(cmd domain.Command) string {
-	switch cmd.Name { // PERF: Name is normalized to uppercase at parse time — removes strings.ToUpper alloc on every dispatch
+	switch cmd.Name {
 	case "PING":
 		return dto.SimpleString("PONG")
 	case "ECHO":
@@ -42,7 +48,6 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			s.store.Set(cmd.Args[0], cmd.Args[1])
 			return dto.SimpleString("OK")
 		}
-		// Handle SET with options (EX/PX)
 		if len(cmd.Args) >= 4 {
 			switch cmd.Args[2] {
 			case "EX":
@@ -61,7 +66,6 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 				return dto.Error("unknown option for 'set' command")
 			}
 		}
-		// len(cmd.Args) == 3: SET key value OPT with missing TTL value
 		return dto.Error("wrong number of arguments for 'set' command with options")
 	case "GET":
 		if len(cmd.Args) < 1 {
@@ -73,28 +77,49 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		}
 		return dto.BulkString(val)
 	case "RPUSH":
-		// Redis: RPUSH key value [value ...] — minimum 2 args (key + at least one value)
 		if len(cmd.Args) < 2 {
 			return dto.Error("wrong number of arguments for 'rpush' command")
 		}
-		var length int
-		for _, v := range cmd.Args[1:] {
-			length = s.store.RPush(cmd.Args[0], v) // length tracks list size after each append; final value is the RESP reply
+		length := s.store.RPushMultiple(cmd.Args[0], cmd.Args[1:])
+		return dto.Integer(length)
+	case "LRANGE":
+		if len(cmd.Args) < 3 {
+			return dto.Error("wrong number of arguments for 'lrange' command")
 		}
-		return dto.Integer(length) // RESP integer reply matching Redis RPUSH semantics
+		start, err := strconv.Atoi(cmd.Args[1])
+		if err != nil {
+			return dto.Error("invalid start index")
+		}
+		stop, err := strconv.Atoi(cmd.Args[2])
+		if err != nil {
+			return dto.Error("invalid stop index")
+		}
+		values := s.store.LRange(cmd.Args[0], start, stop)
+		// Write "*<count>\r\n" followed by each element as a bulk string.
+		var hdr [32]byte
+		countB := strconv.AppendInt(hdr[:0], int64(len(values)), 10)
+		var sb strings.Builder
+		sb.WriteByte('*')
+		sb.Write(countB)
+		sb.WriteString("\r\n")
+		for _, v := range values {
+			sb.WriteString(dto.BulkString(v))
+		}
+		return sb.String()
 	default:
 		return dto.Error("unknown command")
 	}
 }
 
-// parseTTL converts a string to an integer TTL value, validating it's non-negative.
+// parseTTL parses a TTL string and returns its integer value.
+// Returns an error if the value is not a valid non-negative integer.
 func parseTTL(str string) (int, error) {
 	val, err := strconv.Atoi(str)
 	if err != nil {
 		return 0, err
 	}
 	if val < 0 {
-		return 0, fmt.Errorf("invalid expiration time")
+		return 0, errInvalidTTL
 	}
 	return val, nil
 }
