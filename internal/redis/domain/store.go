@@ -47,4 +47,8 @@ type Store interface {
 	// LPop removes and returns the first element of the list at a key or an empty string if the key does not exist
 	// or the list is empty.
 	LPop(key string) string
+
+	// LPopMultiple removes and returns up to count elements from the head of the list at a key.
+	// Returns an empty slice if the key does not exist or the list is empty.
+	LPopMultiple(key string, count int) []string
 }

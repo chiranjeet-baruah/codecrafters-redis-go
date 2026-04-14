@@ -62,6 +62,7 @@ func (m *MemoryStore) Delete(key string) {
 // Must be called without m.mu held.
 func (m *MemoryStore) setWithTTLInternal(key, value string, d time.Duration) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if t, ok := m.timers[key]; ok {
 		t.Stop()
 	}
@@ -72,7 +73,6 @@ func (m *MemoryStore) setWithTTLInternal(key, value string, d time.Duration) {
 		delete(m.data, key)
 		delete(m.timers, key)
 	})
-	m.mu.Unlock()
 }
 
 // SetWithTTLEx stores value under a key and deletes it after ttlSeconds seconds.
@@ -208,5 +208,21 @@ func (m *MemoryStore) LPop(key string) string {
 	result := m.pushData[key][0]
 	m.pushData[key][0] = "" // release the string so it can be GC'd before narrowing the slice
 	m.pushData[key] = m.pushData[key][1:]
+	return result
+}
+
+// LPopMultiple command accepts an optional argument that specifies how many elements to remove from a list and
+// returns the removed elements.
+func (m *MemoryStore) LPopMultiple(key string, count int) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.pushData[key]) == 0 {
+		return nil
+	}
+	if count < 0 || count > len(m.pushData[key]) {
+		count = len(m.pushData[key])
+	}
+	result := m.pushData[key][:count]
+	m.pushData[key] = m.pushData[key][count:]
 	return result
 }

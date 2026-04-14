@@ -29,6 +29,35 @@ func NewCommandService(store domain.Store) *CommandService {
 // errInvalidTTL is returned by parseTTL when the TTL value is negative.
 var errInvalidTTL = errors.New("invalid expiration time")
 
+// encodeRespArray encodes a slice of strings as a RESP array.
+// Pre-computes the exact byte count so the Builder never reallocates.
+func encodeRespArray(values []string) string {
+	if values == nil {
+		values = []string{} // handle nil case gracefully
+	}
+	// Pre-compute the exact byte count so the Builder never reallocates.
+	// Each element is encoded as "$<len>\r\n<v>\r\n"; the header is "*<count>\r\n".
+	var buf [32]byte
+	sz := 1 + len(strconv.AppendInt(buf[:0], int64(len(values)), 10)) + 2
+	for _, v := range values {
+		sz += 1 + len(strconv.AppendInt(buf[:0], int64(len(v)), 10)) + 2 + len(v) + 2
+	}
+	var sb strings.Builder
+	sb.Grow(sz)
+	sb.WriteByte('*')
+	sb.Write(strconv.AppendInt(buf[:0], int64(len(values)), 10))
+	sb.WriteString("\r\n")
+	for _, v := range values {
+		// Inline RESP bulk-string encoding to avoid a per-element intermediate string.
+		sb.WriteByte('$')
+		sb.Write(strconv.AppendInt(buf[:0], int64(len(v)), 10))
+		sb.WriteString("\r\n")
+		sb.WriteString(v)
+		sb.WriteString("\r\n")
+	}
+	return sb.String()
+}
+
 // Handle routes cmd to the right handler and returns a RESP-encoded response.
 // cmd.Name is already uppercased by the RESP parser.
 func (s *CommandService) Handle(cmd domain.Command) string {
@@ -48,24 +77,25 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			s.store.Set(cmd.Args[0], cmd.Args[1])
 			return dto.SimpleString("OK")
 		}
+		// Handle SET with options (EX/PX)
 		if len(cmd.Args) >= 4 {
 			// Uppercase the option so "ex"/"px" is accepted alongside "EX"/"PX".
-			switch strings.ToUpper(cmd.Args[2]) {
-			case "EX":
-				if ttl, err := parseTTL(cmd.Args[3]); err == nil {
-					s.store.SetWithTTLEx(cmd.Args[0], cmd.Args[1], ttl)
-					return dto.SimpleString("OK")
-				}
-				return dto.Error("invalid expiration time")
-			case "PX":
-				if ttl, err := parseTTL(cmd.Args[3]); err == nil {
-					s.store.SetWithTTLPx(cmd.Args[0], cmd.Args[1], ttl)
-					return dto.SimpleString("OK")
-				}
-				return dto.Error("invalid expiration time")
-			default:
+			option := strings.ToUpper(cmd.Args[2])
+			if option != "EX" && option != "PX" {
 				return dto.Error("unknown option for 'set' command")
 			}
+
+			ttl, err := parseTTL(cmd.Args[3])
+			if err != nil {
+				return dto.Error("invalid expiration time")
+			}
+
+			if option == "EX" {
+				s.store.SetWithTTLEx(cmd.Args[0], cmd.Args[1], ttl)
+			} else { // PX
+				s.store.SetWithTTLPx(cmd.Args[0], cmd.Args[1], ttl)
+			}
+			return dto.SimpleString("OK")
 		}
 		return dto.Error("wrong number of arguments for 'set' command with options")
 	case "GET":
@@ -102,27 +132,7 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			return dto.Error("invalid stop index")
 		}
 		values := s.store.LRange(cmd.Args[0], start, stop)
-		// Pre-compute the exact byte count so the Builder never reallocates.
-		// Each element is encoded as "$<len>\r\n<v>\r\n"; the header is "*<count>\r\n".
-		var buf [32]byte
-		sz := 1 + len(strconv.AppendInt(buf[:0], int64(len(values)), 10)) + 2
-		for _, v := range values {
-			sz += 1 + len(strconv.AppendInt(buf[:0], int64(len(v)), 10)) + 2 + len(v) + 2
-		}
-		var sb strings.Builder
-		sb.Grow(sz)
-		sb.WriteByte('*')
-		sb.Write(strconv.AppendInt(buf[:0], int64(len(values)), 10))
-		sb.WriteString("\r\n")
-		for _, v := range values {
-			// Inline RESP bulk-string encoding to avoid a per-element intermediate string.
-			sb.WriteByte('$')
-			sb.Write(strconv.AppendInt(buf[:0], int64(len(v)), 10))
-			sb.WriteString("\r\n")
-			sb.WriteString(v)
-			sb.WriteString("\r\n")
-		}
-		return sb.String()
+		return encodeRespArray(values)
 	case "LLEN":
 		if len(cmd.Args) < 1 {
 			return dto.Error("wrong number of arguments for 'llen' command")
@@ -132,6 +142,14 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 	case "LPOP":
 		if len(cmd.Args) < 1 {
 			return dto.Error("wrong number of arguments for 'lpop' command")
+		}
+		if len(cmd.Args) == 2 {
+			count, err := strconv.Atoi(cmd.Args[1])
+			if err != nil {
+				return dto.Error("invalid count")
+			}
+			val := s.store.LPopMultiple(cmd.Args[0], count)
+			return encodeRespArray(val)
 		}
 		val := s.store.LPop(cmd.Args[0])
 		if val == "" {
