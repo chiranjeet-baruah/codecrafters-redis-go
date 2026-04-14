@@ -49,7 +49,8 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			return dto.SimpleString("OK")
 		}
 		if len(cmd.Args) >= 4 {
-			switch cmd.Args[2] {
+			// Uppercase the option so "ex"/"px" is accepted alongside "EX"/"PX".
+			switch strings.ToUpper(cmd.Args[2]) {
 			case "EX":
 				if ttl, err := parseTTL(cmd.Args[3]); err == nil {
 					s.store.SetWithTTLEx(cmd.Args[0], cmd.Args[1], ttl)
@@ -82,6 +83,12 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		}
 		length := s.store.RPushMultiple(cmd.Args[0], cmd.Args[1:])
 		return dto.Integer(length)
+	case "LPUSH":
+		if len(cmd.Args) < 2 {
+			return dto.Error("wrong number of arguments for 'lpush' command")
+		}
+		length := s.store.LPushMultiple(cmd.Args[0], cmd.Args[1:])
+		return dto.Integer(length)
 	case "LRANGE":
 		if len(cmd.Args) < 3 {
 			return dto.Error("wrong number of arguments for 'lrange' command")
@@ -95,15 +102,25 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			return dto.Error("invalid stop index")
 		}
 		values := s.store.LRange(cmd.Args[0], start, stop)
-		// Write "*<count>\r\n" followed by each element as a bulk string.
-		var hdr [32]byte
-		countB := strconv.AppendInt(hdr[:0], int64(len(values)), 10)
+		// Pre-compute the exact byte count so the Builder never reallocates.
+		// Each element is encoded as "$<len>\r\n<v>\r\n"; the header is "*<count>\r\n".
+		var buf [32]byte
+		sz := 1 + len(strconv.AppendInt(buf[:0], int64(len(values)), 10)) + 2
+		for _, v := range values {
+			sz += 1 + len(strconv.AppendInt(buf[:0], int64(len(v)), 10)) + 2 + len(v) + 2
+		}
 		var sb strings.Builder
+		sb.Grow(sz)
 		sb.WriteByte('*')
-		sb.Write(countB)
+		sb.Write(strconv.AppendInt(buf[:0], int64(len(values)), 10))
 		sb.WriteString("\r\n")
 		for _, v := range values {
-			sb.WriteString(dto.BulkString(v))
+			// Inline RESP bulk-string encoding to avoid a per-element intermediate string.
+			sb.WriteByte('$')
+			sb.Write(strconv.AppendInt(buf[:0], int64(len(v)), 10))
+			sb.WriteString("\r\n")
+			sb.WriteString(v)
+			sb.WriteString("\r\n")
 		}
 		return sb.String()
 	default:

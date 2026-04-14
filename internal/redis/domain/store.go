@@ -32,4 +32,12 @@ type Store interface {
 	// Negative indices count from the tail: -1 is the last element, -2 the second to last, etc.
 	// Returns nil if the key does not exist or the range is empty.
 	LRange(key string, start, stop int) []string
+
+	// LPush prepends value to the head of the list stored at a key and returns the new list length.
+	// An empty value is silently ignored.
+	LPush(key string, value string) int
+
+	// LPushMultiple prepends all non-empty values to the head of the list at a key
+	// and returns the new list length.
+	LPushMultiple(key string, values []string) int
 }

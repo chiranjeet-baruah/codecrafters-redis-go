@@ -8,9 +8,9 @@ import (
 // MemoryStore is an in-memory key-value store safe for concurrent use.
 // It supports string values, list values, and per-key TTL expiry.
 type MemoryStore struct {
-	mu        sync.RWMutex
-	data      map[string]string
-	rPushData map[string][]string
+	mu       sync.RWMutex
+	data     map[string]string
+	pushData map[string][]string
 	// timers keep a reference to each key's expiry timer so it can be
 	// canceled if the key is overwritten or deleted before it fires.
 	timers map[string]*time.Timer
@@ -19,9 +19,9 @@ type MemoryStore struct {
 // NewMemoryStore returns an empty, ready-to-use store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		data:      make(map[string]string),
-		rPushData: make(map[string][]string),
-		timers:    make(map[string]*time.Timer),
+		data:     make(map[string]string),
+		pushData: make(map[string][]string),
+		timers:   make(map[string]*time.Timer),
 	}
 }
 
@@ -101,8 +101,8 @@ func (m *MemoryStore) RPush(key string, value string) int {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.rPushData[key] = append(m.rPushData[key], value)
-	return len(m.rPushData[key])
+	m.pushData[key] = append(m.pushData[key], value)
+	return len(m.pushData[key])
 }
 
 // RPushMultiple appends all non-empty values to the tail of the list at a key
@@ -112,10 +112,10 @@ func (m *MemoryStore) RPushMultiple(key string, values []string) int {
 	defer m.mu.Unlock()
 	for _, v := range values {
 		if len(v) > 0 {
-			m.rPushData[key] = append(m.rPushData[key], v)
+			m.pushData[key] = append(m.pushData[key], v)
 		}
 	}
-	return len(m.rPushData[key])
+	return len(m.pushData[key])
 }
 
 // LRange returns the elements of the list at a key between start and stop (both inclusive).
@@ -126,7 +126,7 @@ func (m *MemoryStore) RPushMultiple(key string, values []string) int {
 func (m *MemoryStore) LRange(key string, start, stop int) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	values, ok := m.rPushData[key]
+	values, ok := m.pushData[key]
 	if !ok {
 		return nil
 	}
@@ -155,4 +155,39 @@ func (m *MemoryStore) LRange(key string, start, stop int) []string {
 	result := make([]string, stop-start+1)
 	copy(result, values[start:stop+1])
 	return result
+}
+
+// LPush prepends value to the head of the list at a key and returns the new list length.
+// An empty value is silently ignored.
+func (m *MemoryStore) LPush(key string, value string) int {
+	if len(value) == 0 {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	existing := m.pushData[key]
+	// Allocate with exact capacity so the subsequent append doesn't trigger a second alloc.
+	newList := make([]string, 1, 1+len(existing))
+	newList[0] = value
+	m.pushData[key] = append(newList, existing...)
+	return len(m.pushData[key])
+}
+
+// LPushMultiple prepends all non-empty values to the head of the list at a key
+// and returns the new list length.
+func (m *MemoryStore) LPushMultiple(key string, values []string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	existing := m.pushData[key]
+	// LPUSH semantics: each element is pushed to the head individually, so the
+	// last-specified element ends up at index 0. Build the prefix in reverse
+	// to reproduce that ordering in a single pass, then append the existing tail.
+	prefix := make([]string, 0, len(values))
+	for i := len(values) - 1; i >= 0; i-- {
+		if len(values[i]) > 0 {
+			prefix = append(prefix, values[i])
+		}
+	}
+	m.pushData[key] = append(prefix, existing...)
+	return len(m.pushData[key])
 }
