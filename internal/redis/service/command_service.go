@@ -162,11 +162,11 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		if len(cmd.Args) < 2 {
 			return dto.Error("wrong number of arguments for 'blpop' command")
 		}
-		timeoutSeconds, err := strconv.Atoi(cmd.Args[1])
+		timeoutSeconds, err := strconv.ParseFloat(cmd.Args[1], 64)
 		if err != nil || timeoutSeconds < 0 {
 			return dto.Error("timeout is not a float or out of range")
 		}
-		timeout := time.Duration(timeoutSeconds) * time.Second
+		timeout := time.Duration(timeoutSeconds * float64(time.Second))
 		val := s.store.BLPop(cmd.Args[0], timeout)
 		if val == nil {
 			return dto.NullArray() // timeout expired with no element available
