@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 // Store is the port interface for the key-value storage layer.
 // Implementations must be safe for concurrent use.
 type Store interface {
@@ -51,4 +53,9 @@ type Store interface {
 	// LPopMultiple removes and returns up to count elements from the head of the list at a key.
 	// Returns an empty slice if the key does not exist or the list is empty.
 	LPopMultiple(key string, count int) []string
+
+	// BLPop removes and returns the first element of the list at a key,
+	// blocking until an element is available or the timeout is reached.
+	// Returns nil if the timeout is reached without an element becoming available.
+	BLPop(key string, timeout time.Duration) []string
 }

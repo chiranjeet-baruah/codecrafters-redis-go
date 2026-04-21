@@ -13,11 +13,21 @@ import (
 	"github.com/codecrafters-io/redis-starter-go/internal/redis/service"
 )
 
-var argBufPool = sync.Pool{
-	New: func() any {
-		return new(make([]byte, 0, 256))
-	},
-}
+var (
+	// readerPool and writerPool reuse the 4 KiB internal buffers across connections
+	// instead of allocating fresh ones for every connect/disconnect cycle.
+	readerPool = sync.Pool{New: func() any { return bufio.NewReaderSize(nil, 4096) }}
+	writerPool = sync.Pool{New: func() any { return bufio.NewWriterSize(nil, 4096) }}
+
+	// argBufPool holds the scratch buffer used to read bulk-string bodies off the wire.
+	// One buffer per goroutine means zero per-argument heap allocations for the read path.
+	argBufPool = sync.Pool{
+		New: func() any {
+			buf := make([]byte, 0, 256)
+			return &buf
+		},
+	}
+)
 
 // handleConn runs the read → dispatch → write loop for a single client connection.
 // It returns (closing the connection) on any I/O error or EOF.
@@ -28,17 +38,24 @@ func handleConn(conn net.Conn, handler service.Handler) {
 			fmt.Println("error closing connection:", err)
 		}
 	}(conn)
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn) // buffers write; flushed once per round-trip
+
+	r := readerPool.Get().(*bufio.Reader)
+	r.Reset(conn) // discard any stale data from a previous connection and bind to conn
+	defer readerPool.Put(r)
+
+	w := writerPool.Get().(*bufio.Writer)
+	w.Reset(conn)
+	defer writerPool.Put(w)
+
 	for {
-		cmd, err := readCommand(reader)
+		cmd, err := readCommand(r)
 		if err != nil {
 			return
 		}
-		if _, err := io.WriteString(writer, handler.Handle(cmd)); err != nil {
+		if _, err := io.WriteString(w, handler.Handle(cmd)); err != nil {
 			return
 		}
-		if err := writer.Flush(); err != nil {
+		if err := w.Flush(); err != nil {
 			return
 		}
 	}

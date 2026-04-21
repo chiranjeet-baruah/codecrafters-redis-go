@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/codecrafters-io/redis-starter-go/internal/redis/domain"
 	"github.com/codecrafters-io/redis-starter-go/internal/redis/dto"
@@ -16,7 +17,7 @@ type Handler interface {
 }
 
 // CommandService routes RESP commands to the store and encodes the responses.
-// Supported commands: PING, ECHO, SET (with optional EX/PX), GET, RPUSH, LPUSH, LRANGE, LLEN, LPOP.
+// Supported commands: PING, ECHO, SET (with optional EX/PX), GET, RPUSH, LPUSH, LRANGE, LLEN, LPOP, BLPOP.
 type CommandService struct {
 	store domain.Store
 }
@@ -79,9 +80,10 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		}
 		// Handle SET with options (EX/PX)
 		if len(cmd.Args) >= 4 {
-			// Uppercase the option so "ex"/"px" is accepted alongside "EX"/"PX".
-			option := strings.ToUpper(cmd.Args[2])
-			if option != "EX" && option != "PX" {
+			option := cmd.Args[2]
+			// EqualFold handles "ex"/"EX"/"Ex" etc. without allocating an uppercase copy.
+			isEX := strings.EqualFold(option, "EX")
+			if !isEX && !strings.EqualFold(option, "PX") {
 				return dto.Error("unknown option for 'set' command")
 			}
 
@@ -90,9 +92,9 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 				return dto.Error("invalid expiration time")
 			}
 
-			if option == "EX" {
+			if isEX {
 				s.store.SetWithTTLEx(cmd.Args[0], cmd.Args[1], ttl)
-			} else { // PX
+			} else {
 				s.store.SetWithTTLPx(cmd.Args[0], cmd.Args[1], ttl)
 			}
 			return dto.SimpleString("OK")
@@ -156,6 +158,20 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			return dto.NullBulkString() // list was empty or key didn't exist
 		}
 		return dto.BulkString(val)
+	case "BLPOP":
+		if len(cmd.Args) < 2 {
+			return dto.Error("wrong number of arguments for 'blpop' command")
+		}
+		timeoutSeconds, err := strconv.Atoi(cmd.Args[1])
+		if err != nil || timeoutSeconds < 0 {
+			return dto.Error("timeout is not a float or out of range")
+		}
+		timeout := time.Duration(timeoutSeconds) * time.Second
+		val := s.store.BLPop(cmd.Args[0], timeout)
+		if val == nil {
+			return dto.NullArray() // timeout expired with no element available
+		}
+		return encodeRespArray(val)
 	default:
 		return dto.Error("unknown command")
 	}

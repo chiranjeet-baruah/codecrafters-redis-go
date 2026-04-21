@@ -13,7 +13,8 @@ type MemoryStore struct {
 	pushData map[string][]string
 	// timers keep a reference to each key's expiry timer so it can be
 	// canceled if the key is overwritten or deleted before it fires.
-	timers map[string]*time.Timer
+	timers  map[string]*time.Timer
+	waiters map[string][]chan string // for BLPOP: key → list of channels waiting for an element to be available
 }
 
 // NewMemoryStore returns an empty, ready-to-use store.
@@ -22,6 +23,7 @@ func NewMemoryStore() *MemoryStore {
 		data:     make(map[string]string),
 		pushData: make(map[string][]string),
 		timers:   make(map[string]*time.Timer),
+		waiters:  make(map[string][]chan string),
 	}
 }
 
@@ -93,28 +95,54 @@ func (m *MemoryStore) SetWithTTLPx(key, value string, ttlMilliseconds int) {
 	m.setWithTTLInternal(key, value, time.Duration(ttlMilliseconds)*time.Millisecond)
 }
 
+// notifyNextWaiter delivers value to the first goroutine waiting on key via BLPOP, if any.
+// Reports whether a waiter was notified. Must be called with m.mu held.
+func (m *MemoryStore) notifyNextWaiter(key, value string) bool {
+	w := m.waiters[key]
+	if len(w) == 0 {
+		return false
+	}
+	w[0] <- value
+	m.waiters[key] = w[1:]
+	return true
+}
+
 // RPush appends value to the tail of the list at a key and returns the new list length.
 // An empty value is silently ignored; the current list length is still returned.
+// When a BLPOP waiter receives the value, it counts toward the returned length
+// because Redis counts it as transiently in the list before the pop.
 func (m *MemoryStore) RPush(key string, value string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(value) > 0 {
-		m.pushData[key] = append(m.pushData[key], value)
+	if len(value) == 0 {
+		return len(m.pushData[key])
 	}
+	if m.notifyNextWaiter(key, value) {
+		return len(m.pushData[key]) + 1
+	}
+	m.pushData[key] = append(m.pushData[key], value)
 	return len(m.pushData[key])
 }
 
 // RPushMultiple appends all non-empty values to the tail of the list at a key
 // and returns the new list length.
+// Values are distributed to waiting BLPOP clients first (one per waiter, in order);
+// any remaining values are appended to the list.
 func (m *MemoryStore) RPushMultiple(key string, values []string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	consumed := 0
 	for _, v := range values {
-		if len(v) > 0 {
+		if len(v) == 0 {
+			continue
+		}
+		if m.notifyNextWaiter(key, v) {
+			consumed++
+		} else {
 			m.pushData[key] = append(m.pushData[key], v)
 		}
 	}
-	return len(m.pushData[key])
+	return len(m.pushData[key]) + consumed
 }
 
 // LRange returns the elements of the list at a key between start and stop (both inclusive).
@@ -158,36 +186,59 @@ func (m *MemoryStore) LRange(key string, start, stop int) []string {
 
 // LPush prepends value to the head of the list at a key and returns the new list length.
 // An empty value is silently ignored; the current list length is still returned.
+// When a BLPOP waiter receives the value, it counts toward the returned length
+// because Redis counts it as transiently in the list before the pop.
 func (m *MemoryStore) LPush(key string, value string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(value) > 0 {
-		existing := m.pushData[key]
-		// Capacity covers both the new element and the existing tail, so append won't reallocate.
-		newList := make([]string, 1, 1+len(existing))
-		newList[0] = value
-		m.pushData[key] = append(newList, existing...)
+	if len(value) == 0 {
+		return len(m.pushData[key])
 	}
+	if m.notifyNextWaiter(key, value) {
+		return len(m.pushData[key]) + 1
+	}
+	existing := m.pushData[key]
+	// Capacity covers both the new element and the existing tail, so append won't reallocate.
+	newList := make([]string, 1, 1+len(existing))
+	newList[0] = value
+	m.pushData[key] = append(newList, existing...)
 	return len(m.pushData[key])
 }
 
 // LPushMultiple prepends all non-empty values to the head of the list at a key
 // and returns the new list length.
+// Values are distributed to waiting BLPOP clients first (one per waiter, in order);
+// any remaining values are prepended to the list in LPUSH order (last element ends up at index 0).
 func (m *MemoryStore) LPushMultiple(key string, values []string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	existing := m.pushData[key]
-	// LPUSH semantics: each element is pushed to the head individually, so the
-	// last-specified element ends up at index 0. Build the prefix in reverse
-	// to reproduce that ordering in a single pass, then append the existing tail.
-	prefix := make([]string, 0, len(values))
-	for i := len(values) - 1; i >= 0; i-- {
-		if len(values[i]) > 0 {
-			prefix = append(prefix, values[i])
+
+	// Satisfy waiting BLPOP clients first, then collect the rest for the list prepend.
+	// Pre-allocate for the common case where no waiters are present and all values go to the list.
+	toAdd := make([]string, 0, len(values))
+	consumed := 0
+	for _, v := range values {
+		if len(v) == 0 {
+			continue
+		}
+		if m.notifyNextWaiter(key, v) {
+			consumed++
+		} else {
+			toAdd = append(toAdd, v)
 		}
 	}
-	m.pushData[key] = append(prefix, existing...)
-	return len(m.pushData[key])
+
+	if len(toAdd) > 0 {
+		// LPUSH semantics: each element is pushed to the head individually, so the
+		// last-specified element ends up at index 0. Build the prefix in reverse
+		// to reproduce that ordering in a single pass, then append the existing tail.
+		prefix := make([]string, len(toAdd))
+		for i, v := range toAdd {
+			prefix[len(toAdd)-1-i] = v
+		}
+		m.pushData[key] = append(prefix, m.pushData[key]...)
+	}
+	return len(m.pushData[key]) + consumed
 }
 
 // LLen returns the length of the list at a key, or 0 if the key does not exist.
@@ -225,4 +276,52 @@ func (m *MemoryStore) LPopMultiple(key string, count int) []string {
 	result := m.pushData[key][:count]
 	m.pushData[key] = m.pushData[key][count:]
 	return result
+}
+
+// BLPop removes and returns the first element of the list.
+// If the list is empty, it blocks until an element is pushed or timeout expires.
+// A timeout of 0 waits indefinitely.
+func (m *MemoryStore) BLPop(key string, timeout time.Duration) []string {
+	m.mu.Lock()
+
+	// Check if data is already available in pushData
+	if list, ok := m.pushData[key]; ok && len(list) > 0 {
+		val := list[0]
+		m.pushData[key] = list[1:]
+		m.mu.Unlock()
+		return []string{key, val}
+	}
+
+	// No data available, set up a channel to wait for it
+	waitCh := make(chan string, 1)
+	m.waiters[key] = append(m.waiters[key], waitCh)
+	m.mu.Unlock()
+
+	// timeout == 0 means wait indefinitely; block directly on the channel.
+	if timeout == 0 {
+		return []string{key, <-waitCh}
+	}
+
+	select {
+	case val := <-waitCh:
+		return []string{key, val}
+	case <-time.After(timeout):
+		m.cleanupWaiter(key, waitCh)
+		return nil
+	}
+}
+
+// cleanupWaiter removes a waitCh from the list of waiters for a key.
+// This is called when a BLPop times out, to ensure the channel doesn't remain in the waiters list indefinitely.
+func (m *MemoryStore) cleanupWaiter(key string, waitCh chan string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	waiters := m.waiters[key]
+	for i, w := range waiters {
+		if w == waitCh {
+			m.waiters[key] = append(waiters[:i], waiters[i+1:]...)
+			break
+		}
+	}
 }

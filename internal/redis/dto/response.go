@@ -35,6 +35,11 @@ func NullBulkString() string {
 	return "$-1\r\n"
 }
 
+// NullArray returns the RESP null array (*-1\r\n), used when a blocking command times out with no result.
+func NullArray() string {
+	return "*-1\r\n"
+}
+
 // Integer encodes n as a RESP integer reply: :<n>\r\n
 func Integer(n int) string {
 	var buf [32]byte
