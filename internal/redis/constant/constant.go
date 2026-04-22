@@ -5,4 +5,5 @@ const (
 	None        = "none"
 	String      = "string"
 	List        = "list"
+	Stream      = "stream"
 )

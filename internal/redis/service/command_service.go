@@ -178,6 +178,29 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		}
 		keyType := s.store.Type(cmd.Args[0])
 		return dto.SimpleString(keyType)
+	case "XADD":
+		if len(cmd.Args) < 3 {
+			return dto.Error("wrong number of arguments for 'xadd' command")
+		}
+		streamKey := cmd.Args[0]
+		entryID := cmd.Args[1]
+		fields := cmd.Args[2:]
+
+		if len(fields)%2 != 0 {
+			return dto.Error("field-value pairs must be even in number")
+		}
+
+		fieldMap := make(map[string]any, len(fields)/2)
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i]] = fields[i+1]
+		}
+
+		newEntryID, err := s.store.XAdd(streamKey, entryID, fieldMap)
+		if err != nil {
+			return dto.Error(err.Error())
+		}
+		return dto.BulkString(newEntryID)
+
 	default:
 		return dto.Error("unknown command")
 	}

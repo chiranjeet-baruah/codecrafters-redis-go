@@ -13,6 +13,8 @@ type MemoryStore struct {
 	mu       sync.RWMutex
 	data     map[string]any
 	pushData map[string][]string
+	// streamData maps stream keys to their entries, where each entry is a map of field→value.
+	streamData map[string]map[string]any
 	// timers keep a reference to each key's expiry timer so it can be
 	// canceled if the key is overwritten or deleted before it fires.
 	timers  map[string]*time.Timer
@@ -22,10 +24,11 @@ type MemoryStore struct {
 // NewMemoryStore returns an empty, ready-to-use store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		data:     make(map[string]any),
-		pushData: make(map[string][]string),
-		timers:   make(map[string]*time.Timer),
-		waiters:  make(map[string][]chan string),
+		data:       make(map[string]any),
+		pushData:   make(map[string][]string),
+		streamData: make(map[string]map[string]any),
+		timers:     make(map[string]*time.Timer),
+		waiters:    make(map[string][]chan string),
 	}
 }
 
@@ -49,7 +52,11 @@ func (m *MemoryStore) Get(key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return raw.(string), true
+	result, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	return result, true
 }
 
 // Delete removes the key from the store and cancels any pending expiry timer for it.
@@ -345,5 +352,25 @@ func (m *MemoryStore) Type(key string) string {
 		return constant.List
 	}
 
+	if _, ok := m.streamData[key]; ok {
+		return constant.Stream
+	}
+
 	return constant.None
+}
+
+// XAdd appends an entry to the stream at streamKey with the given field-value pairs and returns the entry ID.
+func (m *MemoryStore) XAdd(streamKey, entryID string, fieldMap map[string]any) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Ensure the inner map for this specific stream is initialized before writing.
+	if m.streamData[streamKey] == nil {
+		m.streamData[streamKey] = make(map[string]any)
+	}
+
+	// Insert or overwrite the entry payload at the specified entryID.
+	m.streamData[streamKey][entryID] = fieldMap
+
+	return entryID, nil
 }
