@@ -12,16 +12,16 @@ func SimpleString(s string) string {
 
 // BulkString encodes s as a RESP bulk string: $<len>\r\n<s>\r\n
 func BulkString(s string) string {
-	var hdr [32]byte
-	b := strconv.AppendInt(hdr[:0], int64(len(s)), 10)
-	var sb strings.Builder
-	sb.Grow(1 + len(b) + 2 + len(s) + 2) // pre-size so the builder never reallocates
-	sb.WriteByte('$')
-	sb.Write(b)
-	sb.WriteString("\r\n")
-	sb.WriteString(s)
-	sb.WriteString("\r\n")
-	return sb.String()
+	var lenBuf [32]byte
+	lenBytes := strconv.AppendInt(lenBuf[:0], int64(len(s)), 10)
+	var builder strings.Builder
+	builder.Grow(1 + len(lenBytes) + 2 + len(s) + 2) // pre-size so the builder never reallocates
+	builder.WriteByte('$')
+	builder.Write(lenBytes)
+	builder.WriteString("\r\n")
+	builder.WriteString(s)
+	builder.WriteString("\r\n")
+	return builder.String()
 }
 
 // Error encodes msg as a RESP error reply: -ERR <msg>\r\n
@@ -42,12 +42,12 @@ func NullArray() string {
 
 // Integer encodes n as a RESP integer reply: :<n>\r\n
 func Integer(n int) string {
-	var buf [32]byte
-	b := strconv.AppendInt(buf[:0], int64(n), 10)
-	var sb strings.Builder
-	sb.Grow(1 + len(b) + 2) // pre-size so the builder never reallocates
-	sb.WriteByte(':')
-	sb.Write(b)
-	sb.WriteString("\r\n")
-	return sb.String()
+	var intBuf [32]byte
+	lenBytes := strconv.AppendInt(intBuf[:0], int64(n), 10)
+	var builder strings.Builder
+	builder.Grow(1 + len(lenBytes) + 2) // pre-size so the builder never reallocates
+	builder.WriteByte(':')
+	builder.Write(lenBytes)
+	builder.WriteString("\r\n")
+	return builder.String()
 }

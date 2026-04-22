@@ -58,4 +58,8 @@ type Store interface {
 	// blocking until an element is available or the timeout is reached.
 	// Returns nil if the timeout is reached without an element becoming available.
 	BLPop(key string, timeout time.Duration) []string
+
+	// Type returns the Redis type string for the value stored at key:
+	// "string", "list", or "none" if the key does not exist.
+	Type(key string) string
 }

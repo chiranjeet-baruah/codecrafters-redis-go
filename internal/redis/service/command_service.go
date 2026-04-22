@@ -37,26 +37,26 @@ func encodeRespArray(values []string) string {
 		values = []string{} // handle nil case gracefully
 	}
 	// Pre-compute the exact byte count so the Builder never reallocates.
-	// Each element is encoded as "$<len>\r\n<v>\r\n"; the header is "*<count>\r\n".
-	var buf [32]byte
-	sz := 1 + len(strconv.AppendInt(buf[:0], int64(len(values)), 10)) + 2
-	for _, v := range values {
-		sz += 1 + len(strconv.AppendInt(buf[:0], int64(len(v)), 10)) + 2 + len(v) + 2
+	// Each element is encoded as "$<len>\r\n<value>\r\n"; the header is "*<count>\r\n".
+	var lenBuf [32]byte
+	totalSize := 1 + len(strconv.AppendInt(lenBuf[:0], int64(len(values)), 10)) + 2
+	for _, value := range values {
+		totalSize += 1 + len(strconv.AppendInt(lenBuf[:0], int64(len(value)), 10)) + 2 + len(value) + 2
 	}
-	var sb strings.Builder
-	sb.Grow(sz)
-	sb.WriteByte('*')
-	sb.Write(strconv.AppendInt(buf[:0], int64(len(values)), 10))
-	sb.WriteString("\r\n")
-	for _, v := range values {
+	var builder strings.Builder
+	builder.Grow(totalSize)
+	builder.WriteByte('*')
+	builder.Write(strconv.AppendInt(lenBuf[:0], int64(len(values)), 10))
+	builder.WriteString("\r\n")
+	for _, value := range values {
 		// Inline RESP bulk-string encoding to avoid a per-element intermediate string.
-		sb.WriteByte('$')
-		sb.Write(strconv.AppendInt(buf[:0], int64(len(v)), 10))
-		sb.WriteString("\r\n")
-		sb.WriteString(v)
-		sb.WriteString("\r\n")
+		builder.WriteByte('$')
+		builder.Write(strconv.AppendInt(lenBuf[:0], int64(len(value)), 10))
+		builder.WriteString("\r\n")
+		builder.WriteString(value)
+		builder.WriteString("\r\n")
 	}
-	return sb.String()
+	return builder.String()
 }
 
 // Handle routes cmd to the right handler and returns a RESP-encoded response.
@@ -104,11 +104,11 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		if len(cmd.Args) < 1 {
 			return dto.Error("wrong number of arguments for 'get' command")
 		}
-		val, ok := s.store.Get(cmd.Args[0])
+		storedValue, ok := s.store.Get(cmd.Args[0])
 		if !ok {
 			return dto.NullBulkString()
 		}
-		return dto.BulkString(val)
+		return dto.BulkString(storedValue)
 	case "RPUSH":
 		if len(cmd.Args) < 2 {
 			return dto.Error("wrong number of arguments for 'rpush' command")
@@ -150,14 +150,14 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			if err != nil {
 				return dto.Error("invalid count")
 			}
-			val := s.store.LPopMultiple(cmd.Args[0], count)
-			return encodeRespArray(val)
+			elements := s.store.LPopMultiple(cmd.Args[0], count)
+			return encodeRespArray(elements)
 		}
-		val := s.store.LPop(cmd.Args[0])
-		if val == "" {
+		element := s.store.LPop(cmd.Args[0])
+		if element == "" {
 			return dto.NullBulkString() // list was empty or key didn't exist
 		}
-		return dto.BulkString(val)
+		return dto.BulkString(element)
 	case "BLPOP":
 		if len(cmd.Args) < 2 {
 			return dto.Error("wrong number of arguments for 'blpop' command")
@@ -167,11 +167,17 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			return dto.Error("timeout is not a float or out of range")
 		}
 		timeout := time.Duration(timeoutSeconds * float64(time.Second))
-		val := s.store.BLPop(cmd.Args[0], timeout)
-		if val == nil {
+		result := s.store.BLPop(cmd.Args[0], timeout)
+		if result == nil {
 			return dto.NullArray() // timeout expired with no element available
 		}
-		return encodeRespArray(val)
+		return encodeRespArray(result)
+	case "TYPE":
+		if len(cmd.Args) < 1 {
+			return dto.Error("wrong number of arguments for 'type' command")
+		}
+		keyType := s.store.Type(cmd.Args[0])
+		return dto.SimpleString(keyType)
 	default:
 		return dto.Error("unknown command")
 	}
@@ -179,13 +185,13 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 
 // parseTTL parses a TTL string and returns its integer value.
 // Returns an error if the value is not a valid non-negative integer.
-func parseTTL(str string) (int, error) {
-	val, err := strconv.Atoi(str)
+func parseTTL(ttlStr string) (int, error) {
+	ttlValue, err := strconv.Atoi(ttlStr)
 	if err != nil {
 		return 0, err
 	}
-	if val < 0 {
+	if ttlValue < 0 {
 		return 0, errInvalidTTL
 	}
-	return val, nil
+	return ttlValue, nil
 }

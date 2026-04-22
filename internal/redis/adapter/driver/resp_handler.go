@@ -39,23 +39,23 @@ func handleConn(conn net.Conn, handler service.Handler) {
 		}
 	}(conn)
 
-	r := readerPool.Get().(*bufio.Reader)
-	r.Reset(conn) // discard any stale data from a previous connection and bind to conn
-	defer readerPool.Put(r)
+	reader := readerPool.Get().(*bufio.Reader)
+	reader.Reset(conn) // discard any stale data from a previous connection and bind to conn
+	defer readerPool.Put(reader)
 
-	w := writerPool.Get().(*bufio.Writer)
-	w.Reset(conn)
-	defer writerPool.Put(w)
+	writer := writerPool.Get().(*bufio.Writer)
+	writer.Reset(conn)
+	defer writerPool.Put(writer)
 
 	for {
-		cmd, err := readCommand(r)
+		command, err := readCommand(reader)
 		if err != nil {
 			return
 		}
-		if _, err := io.WriteString(w, handler.Handle(cmd)); err != nil {
+		if _, err := io.WriteString(writer, handler.Handle(command)); err != nil {
 			return
 		}
-		if err := w.Flush(); err != nil {
+		if err := writer.Flush(); err != nil {
 			return
 		}
 	}
@@ -78,8 +78,8 @@ func readCommand(r *bufio.Reader) (domain.Command, error) {
 		return domain.Command{}, err
 	}
 
-	bp := argBufPool.Get().(*[]byte)
-	defer argBufPool.Put(bp) // return to pool; safe because parts holds string copies, not refs to bp
+	argBufPtr := argBufPool.Get().(*[]byte)
+	defer argBufPool.Put(argBufPtr) // return to pool; safe because parts holds string copies, not refs to argBufPtr
 
 	parts := make([]string, count)
 	for i := range parts {
@@ -91,18 +91,18 @@ func readCommand(r *bufio.Reader) (domain.Command, error) {
 		if len(line) == 0 || line[0] != '$' {
 			return domain.Command{}, fmt.Errorf("expected bulk string header, got %q", line)
 		}
-		n, err := strconv.Atoi(line[1:])
+		bodyLen, err := strconv.Atoi(line[1:])
 		if err != nil {
 			return domain.Command{}, err
 		}
-		if cap(*bp) < n+2 {
-			*bp = make([]byte, n+2) // grow only when the argument is larger than the buffer
+		if cap(*argBufPtr) < bodyLen+2 {
+			*argBufPtr = make([]byte, bodyLen+2) // grow only when the argument is larger than the buffer
 		}
-		buf := (*bp)[:n+2]
-		if _, err = io.ReadFull(r, buf); err != nil {
+		argBuf := (*argBufPtr)[:bodyLen+2]
+		if _, err = io.ReadFull(r, argBuf); err != nil {
 			return domain.Command{}, err
 		}
-		parts[i] = string(buf[:n]) // copy out before returning the buffer to the pool
+		parts[i] = string(argBuf[:bodyLen]) // copy out before returning the buffer to the pool
 	}
 	// Uppercase once here so every handler receives a consistent, case-insensitive name.
 	return domain.Command{Name: strings.ToUpper(parts[0]), Args: parts[1:]}, nil

@@ -22,12 +22,12 @@ func NewServer(addr string, handler service.Handler) *Server {
 // Each connection runs in its own goroutine. Returns a non-nil error only if the
 // initial bind fails.
 func (s *Server) ListenAndServe() error {
-	l, err := net.Listen("tcp", s.addr)
+	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("failed to bind %s: %w", s.addr, err)
 	}
 	for {
-		conn, err := l.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			fmt.Println("error accepting connection:", err)
 			continue

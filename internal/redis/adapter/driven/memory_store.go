@@ -3,13 +3,15 @@ package driven
 import (
 	"sync"
 	"time"
+
+	"github.com/codecrafters-io/redis-starter-go/internal/redis/constant"
 )
 
 // MemoryStore is an in-memory key-value store safe for concurrent use.
 // It supports string values, list values, and per-key TTL expiry.
 type MemoryStore struct {
 	mu       sync.RWMutex
-	data     map[string]string
+	data     map[string]any
 	pushData map[string][]string
 	// timers keep a reference to each key's expiry timer so it can be
 	// canceled if the key is overwritten or deleted before it fires.
@@ -20,7 +22,7 @@ type MemoryStore struct {
 // NewMemoryStore returns an empty, ready-to-use store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		data:     make(map[string]string),
+		data:     make(map[string]any),
 		pushData: make(map[string][]string),
 		timers:   make(map[string]*time.Timer),
 		waiters:  make(map[string][]chan string),
@@ -32,8 +34,8 @@ func NewMemoryStore() *MemoryStore {
 func (m *MemoryStore) Set(key, value string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if t, ok := m.timers[key]; ok {
-		t.Stop() // cancel the old expiry so it won't delete the new value
+	if timer, ok := m.timers[key]; ok {
+		timer.Stop() // cancel the old expiry so it won't delete the new value
 		delete(m.timers, key)
 	}
 	m.data[key] = value
@@ -43,16 +45,19 @@ func (m *MemoryStore) Set(key, value string) {
 func (m *MemoryStore) Get(key string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	v, ok := m.data[key]
-	return v, ok
+	raw, ok := m.data[key]
+	if !ok {
+		return "", false
+	}
+	return raw.(string), true
 }
 
 // Delete removes the key from the store and cancels any pending expiry timer for it.
 func (m *MemoryStore) Delete(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if t, ok := m.timers[key]; ok {
-		t.Stop()
+	if timer, ok := m.timers[key]; ok {
+		timer.Stop()
 		delete(m.timers, key)
 	}
 	delete(m.data, key)
@@ -62,14 +67,14 @@ func (m *MemoryStore) Delete(key string) {
 // If the key already has a timer, it is canceled first so the old expiry cannot
 // fire and delete the freshly written value.
 // Must be called without m.mu held.
-func (m *MemoryStore) setWithTTLInternal(key, value string, d time.Duration) {
+func (m *MemoryStore) setWithTTLInternal(key, value string, dur time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if t, ok := m.timers[key]; ok {
-		t.Stop()
+	if timer, ok := m.timers[key]; ok {
+		timer.Stop()
 	}
 	m.data[key] = value
-	m.timers[key] = time.AfterFunc(d, func() {
+	m.timers[key] = time.AfterFunc(dur, func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		delete(m.data, key)
@@ -98,12 +103,12 @@ func (m *MemoryStore) SetWithTTLPx(key, value string, ttlMilliseconds int) {
 // notifyNextWaiter delivers value to the first goroutine waiting on key via BLPOP, if any.
 // Reports whether a waiter was notified. Must be called with m.mu held.
 func (m *MemoryStore) notifyNextWaiter(key, value string) bool {
-	w := m.waiters[key]
-	if len(w) == 0 {
+	waiterChans := m.waiters[key]
+	if len(waiterChans) == 0 {
 		return false
 	}
-	w[0] <- value
-	m.waiters[key] = w[1:]
+	waiterChans[0] <- value
+	m.waiters[key] = waiterChans[1:]
 	return true
 }
 
@@ -132,14 +137,14 @@ func (m *MemoryStore) RPushMultiple(key string, values []string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	consumed := 0
-	for _, v := range values {
-		if len(v) == 0 {
+	for _, value := range values {
+		if len(value) == 0 {
 			continue
 		}
-		if m.notifyNextWaiter(key, v) {
+		if m.notifyNextWaiter(key, value) {
 			consumed++
 		} else {
-			m.pushData[key] = append(m.pushData[key], v)
+			m.pushData[key] = append(m.pushData[key], value)
 		}
 	}
 	return len(m.pushData[key]) + consumed
@@ -157,23 +162,23 @@ func (m *MemoryStore) LRange(key string, start, stop int) []string {
 	if !ok {
 		return nil
 	}
-	n := len(values)
+	listLen := len(values)
 	// Resolve negative indices: -1 → last element, -2 → second to last, etc.
 	if start < 0 {
-		start = n + start
+		start = listLen + start
 	}
 	if stop < 0 {
-		stop = n + stop
+		stop = listLen + stop
 	}
 	// Clamp to the valid index range.
 	if start < 0 {
 		start = 0
 	}
-	if start >= n {
+	if start >= listLen {
 		return nil
 	}
-	if stop >= n {
-		stop = n - 1 // stop is inclusive; n-1 is the last valid index
+	if stop >= listLen {
+		stop = listLen - 1 // stop is inclusive; listLen-1 is the last valid index
 	}
 	if start > stop {
 		return nil
@@ -217,14 +222,14 @@ func (m *MemoryStore) LPushMultiple(key string, values []string) int {
 	// Pre-allocate for the common case where no waiters are present and all values go to the list.
 	toAdd := make([]string, 0, len(values))
 	consumed := 0
-	for _, v := range values {
-		if len(v) == 0 {
+	for _, value := range values {
+		if len(value) == 0 {
 			continue
 		}
-		if m.notifyNextWaiter(key, v) {
+		if m.notifyNextWaiter(key, value) {
 			consumed++
 		} else {
-			toAdd = append(toAdd, v)
+			toAdd = append(toAdd, value)
 		}
 	}
 
@@ -233,8 +238,8 @@ func (m *MemoryStore) LPushMultiple(key string, values []string) int {
 		// last-specified element ends up at index 0. Build the prefix in reverse
 		// to reproduce that ordering in a single pass, then append the existing tail.
 		prefix := make([]string, len(toAdd))
-		for i, v := range toAdd {
-			prefix[len(toAdd)-1-i] = v
+		for i, value := range toAdd {
+			prefix[len(toAdd)-1-i] = value
 		}
 		m.pushData[key] = append(prefix, m.pushData[key]...)
 	}
@@ -286,42 +291,59 @@ func (m *MemoryStore) BLPop(key string, timeout time.Duration) []string {
 
 	// Check if data is already available in pushData
 	if list, ok := m.pushData[key]; ok && len(list) > 0 {
-		val := list[0]
+		element := list[0]
 		m.pushData[key] = list[1:]
 		m.mu.Unlock()
-		return []string{key, val}
+		return []string{key, element}
 	}
 
 	// No data available, set up a channel to wait for it
-	waitCh := make(chan string, 1)
-	m.waiters[key] = append(m.waiters[key], waitCh)
+	notifyCh := make(chan string, 1)
+	m.waiters[key] = append(m.waiters[key], notifyCh)
 	m.mu.Unlock()
 
 	// timeout == 0 means wait indefinitely; block directly on the channel.
 	if timeout == 0 {
-		return []string{key, <-waitCh}
+		return []string{key, <-notifyCh}
 	}
 
 	select {
-	case val := <-waitCh:
-		return []string{key, val}
+	case element := <-notifyCh:
+		return []string{key, element}
 	case <-time.After(timeout):
-		m.cleanupWaiter(key, waitCh)
+		m.cleanupWaiter(key, notifyCh)
 		return nil
 	}
 }
 
-// cleanupWaiter removes a waitCh from the list of waiters for a key.
+// cleanupWaiter removes notifyCh from the list of waiters for a key.
 // This is called when a BLPop times out, to ensure the channel doesn't remain in the waiters list indefinitely.
-func (m *MemoryStore) cleanupWaiter(key string, waitCh chan string) {
+func (m *MemoryStore) cleanupWaiter(key string, notifyCh chan string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	waiters := m.waiters[key]
-	for i, w := range waiters {
-		if w == waitCh {
-			m.waiters[key] = append(waiters[:i], waiters[i+1:]...)
+	waiterChans := m.waiters[key]
+	for i, ch := range waiterChans {
+		if ch == notifyCh {
+			m.waiters[key] = append(waiterChans[:i], waiterChans[i+1:]...)
 			break
 		}
 	}
+}
+
+// Type returns the type of value stored at a given key. These types include: string, list, set, zset, hash, stream,
+// and vectorset
+func (m *MemoryStore) Type(key string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if _, ok := m.data[key]; ok {
+		return constant.String
+	}
+
+	if _, ok := m.pushData[key]; ok {
+		return constant.List
+	}
+
+	return constant.None
 }
