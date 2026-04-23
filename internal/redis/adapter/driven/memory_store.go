@@ -1,11 +1,21 @@
 package driven
 
 import (
+	"errors"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/codecrafters-io/redis-starter-go/internal/redis/constant"
 )
+
+// streamEntry holds one entry in a Redis stream: a monotonically increasing ID
+// and its field-value payload.
+type streamEntry struct {
+	ID     string
+	Fields map[string]string
+}
 
 // MemoryStore is an in-memory key-value store safe for concurrent use.
 // It supports string values, list values, and per-key TTL expiry.
@@ -13,8 +23,9 @@ type MemoryStore struct {
 	mu       sync.RWMutex
 	data     map[string]any
 	pushData map[string][]string
-	// streamData maps stream keys to their entries, where each entry is a map of field→value.
-	streamData map[string]map[string]any
+	// streamData maps each stream key to its entries in insertion order.
+	// Entries are appended and never reordered, so the slice is always sorted by ID.
+	streamData map[string][]streamEntry
 	// timers keep a reference to each key's expiry timer so it can be
 	// canceled if the key is overwritten or deleted before it fires.
 	timers  map[string]*time.Timer
@@ -26,7 +37,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		data:       make(map[string]any),
 		pushData:   make(map[string][]string),
-		streamData: make(map[string]map[string]any),
+		streamData: make(map[string][]streamEntry),
 		timers:     make(map[string]*time.Timer),
 		waiters:    make(map[string][]chan string),
 	}
@@ -274,8 +285,8 @@ func (m *MemoryStore) LPop(key string) string {
 	return result
 }
 
-// LPopMultiple command accepts an optional argument that specifies how many elements to remove from a list and
-// returns the removed elements.
+// LPopMultiple removes and returns up to count elements from the head of the list at a key.
+// Returns nil if the key does not exist or the list is empty.
 func (m *MemoryStore) LPopMultiple(key string, count int) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -285,7 +296,9 @@ func (m *MemoryStore) LPopMultiple(key string, count int) []string {
 	if count < 0 || count > len(m.pushData[key]) {
 		count = len(m.pushData[key])
 	}
-	result := m.pushData[key][:count]
+	// Copy to avoid pinning the backing array; LRange already does the same.
+	result := make([]string, count)
+	copy(result, m.pushData[key])
 	m.pushData[key] = m.pushData[key][count:]
 	return result
 }
@@ -296,7 +309,6 @@ func (m *MemoryStore) LPopMultiple(key string, count int) []string {
 func (m *MemoryStore) BLPop(key string, timeout time.Duration) []string {
 	m.mu.Lock()
 
-	// Check if data is already available in pushData
 	if list, ok := m.pushData[key]; ok && len(list) > 0 {
 		element := list[0]
 		m.pushData[key] = list[1:]
@@ -304,7 +316,6 @@ func (m *MemoryStore) BLPop(key string, timeout time.Duration) []string {
 		return []string{key, element}
 	}
 
-	// No data available, set up a channel to wait for it
 	notifyCh := make(chan string, 1)
 	m.waiters[key] = append(m.waiters[key], notifyCh)
 	m.mu.Unlock()
@@ -314,17 +325,21 @@ func (m *MemoryStore) BLPop(key string, timeout time.Duration) []string {
 		return []string{key, <-notifyCh}
 	}
 
+	// NewTimer + Stop prevents the timer goroutine from lingering when an element
+	// arrives before the deadline (time.After has no way to cancel early).
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case element := <-notifyCh:
 		return []string{key, element}
-	case <-time.After(timeout):
+	case <-timer.C:
 		m.cleanupWaiter(key, notifyCh)
 		return nil
 	}
 }
 
-// cleanupWaiter removes notifyCh from the list of waiters for a key.
-// This is called when a BLPop times out, to ensure the channel doesn't remain in the waiters list indefinitely.
+// cleanupWaiter removes notifyCh from the waiter list for key after a BLPop timeout.
+// Deletes the map entry entirely when no waiters remain, preventing unbounded map growth.
 func (m *MemoryStore) cleanupWaiter(key string, notifyCh chan string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -332,14 +347,18 @@ func (m *MemoryStore) cleanupWaiter(key string, notifyCh chan string) {
 	waiterChans := m.waiters[key]
 	for i, ch := range waiterChans {
 		if ch == notifyCh {
-			m.waiters[key] = append(waiterChans[:i], waiterChans[i+1:]...)
+			remaining := append(waiterChans[:i], waiterChans[i+1:]...)
+			if len(remaining) == 0 {
+				delete(m.waiters, key)
+			} else {
+				m.waiters[key] = remaining
+			}
 			break
 		}
 	}
 }
 
-// Type returns the type of value stored at a given key. These types include: string, list, set, zset, hash, stream,
-// and vectorset
+// Type returns the Redis type name for the value stored at key: "string", "list", "stream", or "none".
 func (m *MemoryStore) Type(key string) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -359,18 +378,152 @@ func (m *MemoryStore) Type(key string) string {
 	return constant.None
 }
 
-// XAdd appends an entry to the stream at streamKey with the given field-value pairs and returns the entry ID.
-func (m *MemoryStore) XAdd(streamKey, entryID string, fieldMap map[string]any) (string, error) {
+var (
+	errXAddIDZero  = errors.New("The ID specified in XADD must be greater than 0-0")
+	errXAddIDSmall = errors.New("The ID specified in XADD is equal or smaller than the target stream top item")
+	errInvalidID   = errors.New("invalid stream ID")
+)
+
+// formatStreamID builds a "<ms>-<seq>" string from numeric parts.
+// Stack-allocated buffer avoids a heap allocation; 48 bytes fits any ms-seq pair.
+func formatStreamID(ms, seq int64) string {
+	var buf [48]byte
+	b := strconv.AppendInt(buf[:0], ms, 10)
+	b = append(b, '-')
+	b = strconv.AppendInt(b, seq, 10)
+	return string(b)
+}
+
+// generatePartialID returns a full "<ms>-<seq>" stream ID when the millisecond
+// part is fixed and the sequence must be auto-generated.
+// seq starts at 0 for ms>0, or 1 for ms=0 (since 0-0 is invalid).
+// Returns errXAddIDSmall if ms is less than the last entry's millisecond.
+func generatePartialID(ms int64, entries []streamEntry) (string, error) {
+	seq := int64(0)
+	if ms == 0 {
+		seq = 1 // 0-0 is invalid; minimum is 0-1
+	}
+
+	if len(entries) > 0 {
+		lastMs, lastSeq, err := parseStreamID(entries[len(entries)-1].ID)
+		if err != nil {
+			return "", err
+		}
+		if ms < lastMs {
+			return "", errXAddIDSmall
+		}
+		if ms == lastMs {
+			seq = lastSeq + 1
+		}
+	}
+
+	return formatStreamID(ms, seq), nil
+}
+
+// XAdd appends an entry to the stream at streamKey and returns the entry ID.
+// Pass "*" as entryID to have the server auto-generate a "<ms>-<seq>" ID.
+// Pass "<ms>-*" to fix the millisecond part and auto-generate only the sequence.
+// Returns an error if entryID is not strictly greater than the stream's current last ID.
+func (m *MemoryStore) XAdd(streamKey, entryID string, fields []string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Ensure the inner map for this specific stream is initialized before writing.
-	if m.streamData[streamKey] == nil {
-		m.streamData[streamKey] = make(map[string]any)
+	entries := m.streamData[streamKey]
+
+	if entryID == "*" {
+		entryID = generateStreamID(entries)
+	} else {
+		msStr, seqStr, ok := strings.Cut(entryID, "-")
+		if !ok {
+			return "", errInvalidID
+		}
+
+		ms, err := strconv.ParseInt(msStr, 10, 64)
+		if err != nil {
+			return "", errInvalidID
+		}
+
+		if seqStr == "*" {
+			// Partially auto-generated: ms is fixed, sequence is derived from existing entries.
+			entryID, err = generatePartialID(ms, entries)
+			if err != nil {
+				return "", err
+			}
+		} else {
+			seq, err := strconv.ParseInt(seqStr, 10, 64)
+			if err != nil {
+				return "", errInvalidID
+			}
+			if ms == 0 && seq == 0 {
+				return "", errXAddIDZero
+			}
+			if len(entries) > 0 {
+				lastID := entries[len(entries)-1].ID
+				if !streamIDGreaterThan(entryID, lastID) {
+					return "", errXAddIDSmall
+				}
+			}
+		}
 	}
 
-	// Insert or overwrite the entry payload at the specified entryID.
-	m.streamData[streamKey][entryID] = fieldMap
+	// Build the field map once here; the caller passes a flat key-value slice so no
+	// intermediate map is created at the call site.
+	fieldMap := make(map[string]string, len(fields)/2)
+	for i := 0; i+1 < len(fields); i += 2 {
+		fieldMap[fields[i]] = fields[i+1]
+	}
+
+	m.streamData[streamKey] = append(entries, streamEntry{ID: entryID, Fields: fieldMap})
 
 	return entryID, nil
+}
+
+// generateStreamID returns a "<ms>-<seq>" ID that is strictly greater than the last
+// entry in entries. seq resets to 0 each millisecond; if the clock jumps backward
+// we stay on the last observed millisecond to preserve monotonicity.
+func generateStreamID(entries []streamEntry) string {
+	ms := time.Now().UnixMilli()
+	seq := int64(0)
+
+	if len(entries) > 0 {
+		lastMs, lastSeq, err := parseStreamID(entries[len(entries)-1].ID)
+		if err == nil {
+			if lastMs == ms {
+				seq = lastSeq + 1
+			} else if lastMs > ms {
+				ms = lastMs
+				seq = lastSeq + 1
+			}
+		}
+	}
+
+	return formatStreamID(ms, seq)
+}
+
+// parseStreamID splits a "<ms>-<seq>" stream entry ID into its components.
+func parseStreamID(id string) (ms, seq int64, err error) {
+	msStr, seqStr, ok := strings.Cut(id, "-")
+	if !ok {
+		return 0, 0, errInvalidID
+	}
+	ms, err = strconv.ParseInt(msStr, 10, 64)
+	if err != nil {
+		return
+	}
+	seq, err = strconv.ParseInt(seqStr, 10, 64)
+	return
+}
+
+// streamIDGreaterThan reports whether stream entry ID a is strictly greater than b.
+// IDs are compared numerically: first by millisecond timestamp, then by sequence number.
+func streamIDGreaterThan(a, b string) bool {
+	aMs, aSeq, errA := parseStreamID(a)
+	bMs, bSeq, errB := parseStreamID(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if aMs != bMs {
+		return aMs > bMs
+	}
+	return aSeq > bSeq
 }

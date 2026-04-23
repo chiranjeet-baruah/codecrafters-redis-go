@@ -59,9 +59,12 @@ type Store interface {
 	// Returns nil if the timeout is reached without an element becoming available.
 	BLPop(key string, timeout time.Duration) []string
 
-	// Type returns the Redis type string for the value stored at key
+	// Type returns the Redis type name for the value stored at key, or "none" if the key does not exist.
 	Type(key string) string
 
-	// XAdd appends an entry to the stream at streamKey with the given field-value pairs and returns the entry ID.
-	XAdd(streamKey, entryID string, fieldMap map[string]any) (string, error)
+	// XAdd appends an entry to the stream at streamKey and returns the entry ID.
+	// Pass "*" as entryID to auto-generate a monotonically increasing "<ms>-<seq>" ID.
+	// Returns an error if entryID is not strictly greater than the stream's current last ID.
+	// fields is a flat key-value slice (["k1","v1","k2","v2",...]) that is only read, not stored.
+	XAdd(streamKey, entryID string, fields []string) (string, error)
 }

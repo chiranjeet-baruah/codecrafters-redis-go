@@ -32,12 +32,11 @@ var errInvalidTTL = errors.New("invalid expiration time")
 
 // encodeRespArray encodes a slice of strings as a RESP array.
 // Pre-computes the exact byte count so the Builder never reallocates.
+// Each element is encoded as "$<len>\r\n<value>\r\n"; the header is "*<count>\r\n".
 func encodeRespArray(values []string) string {
 	if values == nil {
-		values = []string{} // handle nil case gracefully
+		values = []string{}
 	}
-	// Pre-compute the exact byte count so the Builder never reallocates.
-	// Each element is encoded as "$<len>\r\n<value>\r\n"; the header is "*<count>\r\n".
 	var lenBuf [32]byte
 	totalSize := 1 + len(strconv.AppendInt(lenBuf[:0], int64(len(values)), 10)) + 2
 	for _, value := range values {
@@ -106,7 +105,7 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		}
 		storedValue, ok := s.store.Get(cmd.Args[0])
 		if !ok {
-			return dto.NullBulkString()
+			return dto.NullBulkString
 		}
 		return dto.BulkString(storedValue)
 	case "RPUSH":
@@ -155,7 +154,7 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		}
 		element := s.store.LPop(cmd.Args[0])
 		if element == "" {
-			return dto.NullBulkString() // list was empty or key didn't exist
+			return dto.NullBulkString
 		}
 		return dto.BulkString(element)
 	case "BLPOP":
@@ -169,7 +168,7 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		timeout := time.Duration(timeoutSeconds * float64(time.Second))
 		result := s.store.BLPop(cmd.Args[0], timeout)
 		if result == nil {
-			return dto.NullArray() // timeout expired with no element available
+			return dto.NullArray
 		}
 		return encodeRespArray(result)
 	case "TYPE":
@@ -179,7 +178,7 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 		keyType := s.store.Type(cmd.Args[0])
 		return dto.SimpleString(keyType)
 	case "XADD":
-		if len(cmd.Args) < 3 {
+		if len(cmd.Args) < 4 {
 			return dto.Error("wrong number of arguments for 'xadd' command")
 		}
 		streamKey := cmd.Args[0]
@@ -190,12 +189,7 @@ func (s *CommandService) Handle(cmd domain.Command) string {
 			return dto.Error("field-value pairs must be even in number")
 		}
 
-		fieldMap := make(map[string]any, len(fields)/2)
-		for i := 0; i < len(fields); i += 2 {
-			fieldMap[fields[i]] = fields[i+1]
-		}
-
-		newEntryID, err := s.store.XAdd(streamKey, entryID, fieldMap)
+		newEntryID, err := s.store.XAdd(streamKey, entryID, fields)
 		if err != nil {
 			return dto.Error(err.Error())
 		}

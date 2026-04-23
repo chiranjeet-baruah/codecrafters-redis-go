@@ -29,16 +29,11 @@ func Error(msg string) string {
 	return "-ERR " + msg + "\r\n"
 }
 
-// NullBulkString returns the RESP null bulk string ($-1\r\n),
-// used to indicate a missing key.
-func NullBulkString() string {
-	return "$-1\r\n"
-}
+// NullBulkString is the RESP null bulk string, used to indicate a missing key.
+const NullBulkString = "$-1\r\n"
 
-// NullArray returns the RESP null array (*-1\r\n), used when a blocking command times out with no result.
-func NullArray() string {
-	return "*-1\r\n"
-}
+// NullArray is the RESP null array, returned when a blocking command times out with no result.
+const NullArray = "*-1\r\n"
 
 // Integer encodes n as a RESP integer reply: :<n>\r\n
 func Integer(n int) string {
